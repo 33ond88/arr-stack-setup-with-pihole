@@ -1,0 +1,249 @@
+  GNU nano 8.4                            /mnt/user/appdata/traefik/traefik.yml                                      
+  websecure:
+    address: ":443"
+
+providers:
+  docker:
+    endpoint: "unix:///var/run/docker.sock"
+    exposedByDefault: false
+    # If you use a dedicated network for routed apps:
+    network: proxy-net
+  file:
+    directory: "/etc/traefik/dynamic"
+    watch: true
+
+certificatesResolvers:
+  le:
+    acme:
+      email: "you@bondlabs.org"
+      storage: "/acme/acme.json"
+      dnsChallenge:
+        provider: cloudflare
+        resolvers:
+          - "1.1.1.1:53"
+          - "8.8.8.8:53"
+
+# 10/30/25 trying to get HAOS to HTTPS
+api:
+  dashboard: true
+log:
+  level: DEBUG
+
+##########################
+
+# /mnt/user/appdata/stacks/traefik/docker-compose.yml (.env in this /mnt/user/appdata/stacks/traefik)
+services:
+  traefik:
+    image: traefik:v3.1
+    container_name: traefik
+    command:
+      - --api.dashboard=true
+      - --entrypoints.web.address=:80
+      - --entrypoints.websecure.address=:443
+      - --providers.docker.exposedbydefault=false
+      - --configFile=/traefik.yml             # <— tells Traefik to read your static file
+      - --api=true                            # <— ensures api@internal exists 10/30/25 09:10 PM
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      - TZ=America/Phoenix
+      - CF_DNS_API_TOKEN=${CF_DNS_API_TOKEN}
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - /mnt/user/appdata/traefik/traefik.yml:/traefik.yml:ro
+      - /mnt/user/appdata/traefik/acme:/acme
+      # NEW: file provider directory (must match traefik.yml)
+      - /mnt/user/appdata/traefik/dynamic:/etc/traefik/dynamic:ro
+    networks:
+      - proxy-net
+    restart: unless-stopped
+
+    labels:
+      - traefik.enable=true
+      # Router: dashboard
+      - traefik.http.routers.traefik.rule=Host(`traefik.home.bondlabs.org`)
+      - traefik.http.routers.traefik.entrypoints=websecure
+      - traefik.http.routers.traefik.tls.certresolver=le
+      - traefik.http.routers.traefik.service=api@internal
+      - traefik.http.routers.traefik.middlewares=traefik-auth@docker,lan-only@docker
+      # Middleware: Basic Auth (paste your bcrypt line)
+      - traefik.http.middlewares.traefik-auth.basicauth.users=admin:$$2y$$05$$d7YuaNw7ipo.MplR7.UmYeuX.pNVQpkZYQg/xWOWdb3iT06sk01rO
+      # Middleware: LAN-only (optional)
+      - traefik.http.middlewares.lan-only.ipallowlist.sourcerange=10.10.0.0/16,127.0.0.1/32
+# HAOS
+      - "traefik.http.routers.haos.rule=Host(`haos.home.bondlabs.org`)"
+      - "traefik.http.routers.haos.entrypoints=websecure"
+      - "traefik.http.routers.haos.tls.certresolver=cloudflare"
+      - "traefik.http.services.haos.loadbalancer.server.port=8123"
+      - "traefik.http.services.haos.loadbalancer.server.scheme=http"
+
+networks:
+  proxy-net:
+    external: true
+
+################
+
+ GNU nano 8.4                                      /mnt/user/appdata/traefik/dynamic/ha.yml                                                 
+http:
+  routers:
+    ha:
+      rule: "Host(`ha.home.bondlabs.org`)"
+      entryPoints: [websecure]
+      tls:
+        certResolver: le
+      service: ha
+
+  services:
+    ha:
+      loadBalancer:
+        servers:
+          - url: "http://10.10.10.22:8123"
+        passHostHeader: true
+
+######################
+
+  GNU nano 8.4                                 /mnt/user/appdata/stacks/whoami/docker-compose.yml                                            
+services:
+  whoami:
+    image: traefik/whoami:latest
+    container_name: whoami
+    networks: [proxy-net]
+    labels:
+      - traefik.enable=true
+      # HTTPS router
+      - traefik.http.routers.whoami.rule=Host(`whoami.home.bondlabs.org`)
+      - traefik.http.routers.whoami.entrypoints=websecure
+      - traefik.http.routers.whoami.tls.certresolver=le
+      # HTTP fallback (so we can reach it even before certs)
+      - traefik.http.routers.whoami-http.rule=Host(`whoami.home.bondlabs.org`)
+      - traefik.http.routers.whoami-http.entrypoints=web
+    restart: unless-stopped
+
+networks:
+  proxy-net:
+    external: true
+
+#############################
+
+  GNU nano 8.4                                  /mnt/user/appdata/stacks/arrs/docker-compose.yml                                             
+services:
+  prowlarr:
+    image: lscr.io/linuxserver/prowlarr:latest
+    container_name: prowlarr
+    environment:
+      - PUID=99
+      - PGID=100
+      - TZ=America/Phoenix
+    volumes:
+      - /mnt/user/appdata/prowlarr:/config
+      - /mnt/user/downloads:/downloads
+    networks: [proxy-net]
+    labels:
+      - traefik.enable=true
+      # HTTPS
+      - traefik.http.routers.prowlarr.rule=Host(`prowlarr.home.bondlabs.org`)
+      - traefik.http.routers.prowlarr.entrypoints=websecure
+      - traefik.http.routers.prowlarr.tls.certresolver=le
+      - traefik.http.services.prowlarr.loadbalancer.server.port=9696
+      # HTTP fallback (temporary)
+      - traefik.http.routers.prowlarr-http.rule=Host(`prowlarr.home.bondlabs.org`)
+      - traefik.http.routers.prowlarr-http.entrypoints=web
+    restart: unless-stopped
+
+  sonarr:
+    image: lscr.io/linuxserver/sonarr:latest
+    container_name: sonarr
+    environment:
+      - PUID=99
+      - PGID=100
+      - TZ=America/Phoenix
+    volumes:
+      - /mnt/user/appdata/sonarr:/config
+      - /mnt/user/downloads:/downloads
+      - /mnt/user/media/TV:/tv
+    networks: [proxy-net]
+    labels:
+      - traefik.enable=true
+      # HTTPS
+      - traefik.http.routers.sonarr.rule=Host(`sonarr.home.bondlabs.org`)
+      - traefik.http.routers.sonarr.entrypoints=websecure
+      - traefik.http.routers.sonarr.tls.certresolver=le
+      - traefik.http.services.sonarr.loadbalancer.server.port=8989
+      # HTTP fallback (temporary)
+      - traefik.http.routers.sonarr-http.rule=Host(`sonarr.home.bondlabs.org`)
+      - traefik.http.routers.sonarr-http.entrypoints=web
+    restart: unless-stopped
+
+  radarr:
+    image: lscr.io/linuxserver/radarr:latest
+    container_name: radarr
+    environment:
+      - PUID=99
+      - PGID=100
+      - TZ=America/Phoenix
+    volumes:
+      - /mnt/user/appdata/radarr:/config
+      - /mnt/user/downloads:/downloads
+      - /mnt/user/media/Movies:/movies
+    networks: [proxy-net]
+    labels:
+      - traefik.enable=true
+      # HTTPS
+      - traefik.http.routers.radarr.rule=Host(`radarr.home.bondlabs.org`)
+      - traefik.http.routers.radarr.entrypoints=websecure
+      - traefik.http.routers.radarr.tls.certresolver=le
+      - traefik.http.services.radarr.loadbalancer.server.port=7878
+      # HTTP fallback (temporary)
+      - traefik.http.routers.radarr-http.rule=Host(`radarr.home.bondlabs.org`)
+      - traefik.http.routers.radarr-http.entrypoints=web
+    restart: unless-stopped
+
+networks:
+  proxy-net:
+    external: true
+
+##################
+
+  GNU nano 8.4                                 /mnt/user/appdata/stacks/gluetun/docker-compose.yml                                           
+services:
+  gluetun:
+    image: qmcgaw/gluetun:latest
+    container_name: gluetun
+    cap_add:
+      - NET_ADMIN
+    devices:
+      - /dev/net/tun
+    environment:
+      - TZ=America/Phoenix
+      # Choose ONE provider. Start with Nord or Mullvad:
+      - VPN_SERVICE_PROVIDER=nordvpn     # or mullvad
+      - VPN_TYPE=openvpn                 # we'll switch to wireguard later
+      # For Nord:
+      - OPENVPN_USER=CiAbWMM3ZP724LUzsSxqXoRh
+      - OPENVPN_PASSWORD=e82hFuRqxvrBWvMrxwNW2jU7
+      # Optional pinning:
+      # - SERVER_COUNTRIES=United States
+    ports:
+      - "8080:8080"     # qBittorrent WebUI forwarded through the VPN
+      - "6881:6881"     # torrent ports forwarded through VPN
+      - "6881:6881/udp"
+    volumes:
+      - /mnt/user/appdata/gluetun:/gluetun
+    restart: unless-stopped
+
+  qbittorrent:
+    image: lscr.io/linuxserver/qbittorrent:latest
+    container_name: qbittorrent
+    network_mode: service:gluetun   # share the VPN network stack
+    environment:
+      - PUID=99
+      - PGID=100
+      - TZ=America/Phoenix
+      - WEBUI_PORT=8080
+    volumes:
+      - /mnt/user/appdata/qbittorrent:/config
+      - /mnt/user/downloads:/downloads
+    depends_on:
+      - gluetun
+    restart: unless-stopped
